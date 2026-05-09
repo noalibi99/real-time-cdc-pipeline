@@ -1,0 +1,11 @@
+[project]
+name = "big-data-cdc-project"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "faker>=40.15.0",
+    "numpy>=2.4.4",
+    "psycopg2>=2.9.12",
+]
