@@ -75,7 +75,37 @@ services:
             - "8080:8080"
         depends_on:
             - kafka
+    spark-master:
+        image: spark:latest
+        container_name: spark-master
+        environment:
+            - SPARK_MODE=master
+        command:
+            - /opt/spark/bin/spark-class
+            - org.apache.spark.deploy.master.Master
+        ports:
+            - "7077:7077"
+            - "8082:8080"   # Spark UI on host 8082
+        volumes:
+            - spark_data:/opt/spark/data
+
+    spark-worker:
+        image: spark:latest
+        container_name: spark-worker
+        environment:
+            - SPARK_MODE=worker
+            - SPARK_MASTER_URL=spark://spark-master:7077
+            - SPARK_WORKER_MEMORY=1G
+            - SPARK_WORKER_CORES=1
+        command:
+            - /opt/spark/bin/spark-class
+            - org.apache.spark.deploy.worker.Worker
+            - spark://spark-master:7077
+        depends_on:
+            - spark-master
+    
 
 volumes:
     postgres_data:
     pgadmin_data:
+    spark_data:
