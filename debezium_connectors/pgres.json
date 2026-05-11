@@ -1,19 +1,22 @@
 {
-  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-  "database.hostname": "postgres",
-  "database.port": "5432",
-  "database.user": "pgres",
-  "database.password": "pgres",
-  "database.dbname": "trading",
+  "name": "pg-trades-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "pgres",
+    "database.password": "pgres",
+    "database.dbname": "trading",
 
-  "topic.prefix": "trading",
-  "table.include.list": "public.trades",
-  "plugin.name": "pgoutput",
+    "topic.prefix": "trading",
+    "table.include.list": "public.trades",
+    "plugin.name": "pgoutput",
 
-  "transforms": "unwrap",
-  "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
-  "transforms.unwrap.drop.tombstones": "false",
-  "transforms.unwrap.delete.handling.mode": "rewrite",
+    "transforms": "unwrap",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.drop.tombstones": "false",
+    "transforms.unwrap.delete.handling.mode": "rewrite",
 
-  "decimal.handling.mode": "double"
+    "decimal.handling.mode": "double"
+  }
 }

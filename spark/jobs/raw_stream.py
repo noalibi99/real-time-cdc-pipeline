@@ -1,13 +1,18 @@
+import os
+
 from pyspark.sql import SparkSession
 
+bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+topic = os.getenv("KAFKA_TOPIC", "trading.public.trades")
+
 spark = SparkSession.builder \
-    .appName("trading-stream") \
+    .appName("kafka-raw-stream") \
     .getOrCreate()
 
 df = spark.readStream \
     .format("kafka") \
-    .option("kafka.bootstrap.servers", "localhost:9092") \
-    .option("subscribe", "trading.public.trades") \
+    .option("kafka.bootstrap.servers", bootstrap_servers) \
+    .option("subscribe", topic) \
     .option("startingOffsets", "latest") \
     .load()
 
