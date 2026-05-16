@@ -76,7 +76,7 @@ services:
         depends_on:
             - kafka
     spark-master:
-        image: spark:latest
+        image: spark:3.5.5
         container_name: spark-master
         environment:
             - SPARK_MODE=master
@@ -88,9 +88,11 @@ services:
             - "8082:8080"   # Spark UI on host 8082
         volumes:
             - spark_data:/opt/spark/data
+            - ./spark/jobs:/opt/spark/jobs
+            - ./spark/jars:/opt/spark/jarss
 
     spark-worker:
-        image: spark:latest
+        image: spark:3.5.5
         container_name: spark-worker
         environment:
             - SPARK_MODE=worker
@@ -103,6 +105,10 @@ services:
             - spark://spark-master:7077
         depends_on:
             - spark-master
+        volumes:
+            - spark_data:/opt/spark/data
+            - ./spark/jobs:/opt/spark/jobs
+            - ./spark/jars:/opt/spark/jarss
     
 
 volumes:

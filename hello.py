@@ -1,6 +1,7 @@
 import uuid
 import time
 import random
+import os
 from datetime import datetime
 
 import numpy as np
@@ -96,7 +97,7 @@ def generate_trade():
 
     quantity = int(np.round(trade_value / price, 2))
     quantity = max(1, quantity)
-    
+
 
     side = np.random.choice(
         ["BUY", "SELL"],
@@ -155,7 +156,7 @@ cursor = conn.cursor()
 print("Starting live trade generation...\n")
 
 
-trades_per_second = 10
+trades_per_second = int(os.getenv("TRADES_PER_SECOND", "10"))
 
 
 while True:
