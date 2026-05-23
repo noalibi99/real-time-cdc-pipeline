@@ -97,6 +97,10 @@ services:
         ports:
             - "8888:8888"
             - "8084:8080"
+            - "4040:4040"
+            - "4041:4041"
+            - "4042:4042"
+            - "4043:4043"
             - "10000:10000"
             - "10001:10001"
 
@@ -186,11 +190,58 @@ services:
             - rest
             - minio
 
+    superset:
+        build: superset/
+        container_name: superset
+        networks:
+            iceberg_net:
+        environment:
+            - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY:-change-me-for-local-dev-only}
+            - SUPERSET_LOAD_EXAMPLES=no
+        ports:
+            - "8088:8088"
+        volumes:
+            - superset_home:/app/superset_home
+            - ./superset/superset_config.py:/app/pythonpath/superset_config.py
+        depends_on:
+            superset-init:
+                condition: service_completed_successfully
+        command: >
+            /bin/sh -c "
+            superset run -h 0.0.0.0 -p 8088
+            "
+
+    superset-init:
+        build: superset/
+        container_name: superset-init
+        networks:
+            iceberg_net:
+        environment:
+            - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY:-change-me-for-local-dev-only}
+        volumes:
+            - superset_home:/app/superset_home
+            - ./superset/superset_config.py:/app/pythonpath/superset_config.py
+        depends_on:
+            - trino
+        command: >
+            /bin/sh -c "
+            superset db upgrade &&
+            (superset fab create-admin
+            --username admin
+            --firstname Superset
+            --lastname Admin
+            --email admin@example.com
+            --password admin || true) &&
+            superset init &&
+            superset set-database-uri -d Iceberg -u trino://superset@trino:8080/iceberg/gold
+            "
+
 
 volumes:
     postgres_data:
     pgadmin_data:
     minio_data:
+    superset_home:
 
 networks:
     iceberg_net:

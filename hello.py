@@ -67,6 +67,16 @@ PORTFOLIOS = [
         "portfolio_id": str(uuid.uuid4()),
         "strategy": "Retail",
         "tickers": list(TICKERS.keys())
+    },
+    {
+        "portfolio_id": str(uuid.uuid4()),
+        "strategy": "Value",
+        "tickers": ["GOOGL", "AMZN"]
+    },
+    {
+        "portfolio_id": str(uuid.uuid4()),
+        "strategy": "Dividend",
+        "tickers": ["AAPL", "MSFT", "GOOGL", "AMZN", "META"]
     }
 ]
 

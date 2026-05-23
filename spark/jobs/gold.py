@@ -1,22 +1,19 @@
 """
-Bronze streaming job: Kafka raw trades -> Iceberg.
-
-This job intentionally keeps the Kafka payload opaque for zero-loss ingestion.
+Gold streaming job: Silver trades -> portfolio positions.
 """
 
 import os
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import coalesce, col, current_timestamp, get_json_object, upper
+from pyspark.sql.functions import col, lit, sum as spark_sum, when
 
 
 ICEBERG_CATALOG = "rest_catalog"
-KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
-KAFKA_TOPIC = "trading.public.trades"
-BRONZE_TABLE = f"{ICEBERG_CATALOG}.bronze.trades"
-BRONZE_TABLE_LOCATION = "s3://bronze/trades"
-BRONZE_DATA_LOCATION = "s3://bronze/trades/data"
-BRONZE_CHECKPOINT = "s3a://bronze/checkpoints/bronze_trades"
+SILVER_TABLE = f"{ICEBERG_CATALOG}.silver.trades"
+GOLD_TABLE = f"{ICEBERG_CATALOG}.gold.portfolio_positions"
+GOLD_TABLE_LOCATION = "s3://gold/portfolio_positions"
+GOLD_DATA_LOCATION = "s3://gold/portfolio_positions/data"
+GOLD_CHECKPOINT = "s3a://gold/checkpoints/gold_positions_v2"
 
 SPARK_PACKAGES = ",".join(
     [
@@ -75,79 +72,81 @@ def build_spark(app_name: str) -> SparkSession:
 
 
 def ensure_iceberg_objects(spark: SparkSession) -> None:
-    # Explicitly maps the bronze namespace to its dedicated MinIO bucket.
-    spark.sql("CREATE NAMESPACE IF NOT EXISTS rest_catalog.bronze LOCATION 's3://bronze/'")
+    # Explicitly maps the gold namespace to its dedicated MinIO bucket.
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS rest_catalog.gold LOCATION 's3://gold/'")
     spark.sql(
         f"""
-        CREATE TABLE IF NOT EXISTS rest_catalog.bronze.trades (
-            key STRING,
-            value STRING,
-            ingest_timestamp TIMESTAMP,
-            ticker STRING
+        CREATE TABLE IF NOT EXISTS rest_catalog.gold.portfolio_positions (
+            portfolio_id STRING,
+            ticker STRING,
+            net_quantity DECIMAL(28,2),
+            total_fees DECIMAL(28,2),
+            total_value DECIMAL(28,2)
         )
         USING iceberg
         PARTITIONED BY (ticker)
-        LOCATION '{BRONZE_TABLE_LOCATION}'
+        LOCATION '{GOLD_TABLE_LOCATION}'
         TBLPROPERTIES ('format-version' = '2')
         """
     )
     try:
-        spark.sql(f"ALTER TABLE {BRONZE_TABLE} ADD COLUMNS (ticker STRING)")
+        spark.sql(f"ALTER TABLE {GOLD_TABLE} ADD COLUMN total_value DECIMAL(28,2)")
     except Exception:
         pass
     try:
-        spark.sql(f"ALTER TABLE {BRONZE_TABLE} DROP PARTITION FIELD days(ingest_timestamp)")
-    except Exception:
-        pass
-    try:
-        spark.sql(f"ALTER TABLE {BRONZE_TABLE} ADD PARTITION FIELD ticker")
+        spark.sql(f"ALTER TABLE {GOLD_TABLE} ADD PARTITION FIELD ticker")
     except Exception:
         pass
     spark.sql(
         f"""
-        ALTER TABLE {BRONZE_TABLE}
-        SET TBLPROPERTIES ('write.data.path' = '{BRONZE_DATA_LOCATION}')
+        ALTER TABLE {GOLD_TABLE}
+        SET TBLPROPERTIES ('write.data.path' = '{GOLD_DATA_LOCATION}')
         """
     )
 
+def drop_gold_table(spark: SparkSession) -> None:
+    spark.sql(f"DROP TABLE IF EXISTS {GOLD_TABLE}")
+
+
+def overwrite_gold_table(batch_df, _batch_id: int) -> None:
+    # Iceberg destination for the Gold layer: replace current positions each batch.
+    batch_df.writeTo(GOLD_TABLE).overwrite(lit(True))
+
 
 def main() -> None:
-    spark = build_spark("medallion-bronze-trades")
+    spark = build_spark("medallion-gold-portfolio-positions")
     spark.sparkContext.setLogLevel("WARN")
+    # drop_gold_table(spark)
     ensure_iceberg_objects(spark)
 
-    raw_trades = (
-        spark.readStream
-        .format("kafka")
-        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
-        .option("subscribe", KAFKA_TOPIC)
-        .option("startingOffsets", "earliest")
-        .option("failOnDataLoss", "false")
-        .load()
+    silver_trades = spark.readStream.format("iceberg").load(SILVER_TABLE)
+
+    signed_quantity = (
+        when(col("side") == "BUY", col("quantity"))
+        .when(col("side") == "SELL", -col("quantity"))
+        .otherwise(lit(0).cast("decimal(18,2)"))
     )
 
-    bronze_trades = raw_trades.select(
-        col("key").cast("string").alias("key"),
-        col("value").cast("string").alias("value"),
-        current_timestamp().alias("ingest_timestamp"),
-        upper(
-            coalesce(
-                get_json_object(col("value").cast("string"), "$.ticker"),
-                get_json_object(col("value").cast("string"), "$.payload.ticker"),
-                get_json_object(col("value").cast("string"), "$.after.ticker"),
-                get_json_object(col("value").cast("string"), "$.payload.after.ticker"),
-            )
-        ).alias("ticker"),
+    portfolio_positions = (
+        silver_trades
+        # Watermark bounds aggregation state for real-time portfolio positions.
+        .withWatermark("trade_timestamp", "15 minutes")
+        .groupBy("portfolio_id", "ticker")
+        .agg(
+            spark_sum(signed_quantity).alias("net_quantity"),
+            spark_sum(col("fees")).alias("total_fees"),
+            spark_sum(col("trade_value").cast("decimal(18,2)")).alias("total_value"),
+        )
     )
 
     query = (
-        bronze_trades.writeStream
-        .format("iceberg")
-        .outputMode("append")
-        # Streaming checkpoint lives in the physically isolated bronze bucket.
-        .option("checkpointLocation", BRONZE_CHECKPOINT)
-        # Iceberg destination for the Bronze layer.
-        .toTable(BRONZE_TABLE)
+        portfolio_positions.writeStream
+        # Complete mode is required for running streaming aggregations.
+        .outputMode("complete")
+        # Streaming checkpoint lives in the physically isolated gold bucket.
+        .option("checkpointLocation", GOLD_CHECKPOINT)
+        .foreachBatch(overwrite_gold_table)
+        .start()
     )
 
     query.awaitTermination()
