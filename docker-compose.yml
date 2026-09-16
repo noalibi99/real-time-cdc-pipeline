@@ -42,6 +42,9 @@ services:
     kafka:
         image: confluentinc/cp-kafka:7.6.1
         container_name: kafka
+        networks:
+            default:
+            iceberg_net:
         environment:
             KAFKA_BROKER_ID: 1
             KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -75,43 +78,170 @@ services:
             - "8080:8080"
         depends_on:
             - kafka
-    spark-master:
-        image: spark:3.5.5
-        container_name: spark-master
-        environment:
-            - SPARK_MODE=master
-        command:
-            - /opt/spark/bin/spark-class
-            - org.apache.spark.deploy.master.Master
-        ports:
-            - "7077:7077"
-            - "8082:8080"   # Spark UI on host 8082
-        volumes:
-            - spark_data:/opt/spark/data
-            - ./spark/jobs:/opt/spark/jobs
-            - ./spark/jars:/opt/spark/jarss
-
-    spark-worker:
-        image: spark:3.5.5
-        container_name: spark-worker
-        environment:
-            - SPARK_MODE=worker
-            - SPARK_MASTER_URL=spark://spark-master:7077
-            - SPARK_WORKER_MEMORY=1G
-            - SPARK_WORKER_CORES=1
-        command:
-            - /opt/spark/bin/spark-class
-            - org.apache.spark.deploy.worker.Worker
-            - spark://spark-master:7077
+    spark-iceberg:
+        image: tabulario/spark-iceberg
+        container_name: spark-iceberg
+        build: spark/
+        networks:
+            iceberg_net:
         depends_on:
-            - spark-master
+            - rest
+            - minio
         volumes:
-            - spark_data:/opt/spark/data
-            - ./spark/jobs:/opt/spark/jobs
-            - ./spark/jars:/opt/spark/jarss
-    
+            - ./warehouse:/home/iceberg/warehouse
+            - ./spark/jobs:/home/iceberg/notebooks/notebooks
+        environment:
+            - AWS_ACCESS_KEY_ID=admin
+            - AWS_SECRET_ACCESS_KEY=password
+            - AWS_REGION=us-east-1
+        ports:
+            - "8888:8888"
+            - "8084:8080"
+            - "4040:4040"
+            - "4041:4041"
+            - "4042:4042"
+            - "4043:4043"
+            - "10000:10000"
+            - "10001:10001"
+
+    rest:
+        image: apache/iceberg-rest-fixture
+        container_name: iceberg-rest
+        networks:
+            iceberg_net:
+        ports:
+            - "8181:8181"
+        environment:
+            - AWS_ACCESS_KEY_ID=admin
+            - AWS_SECRET_ACCESS_KEY=password
+            - AWS_REGION=us-east-1
+            - CATALOG_WAREHOUSE=s3://warehouse/
+            - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+            - CATALOG_S3_ENDPOINT=http://minio:9000
+            - CATALOG_S3_PATH_STYLE_ACCESS=true
+
+    minio:
+        image: minio/minio
+        container_name: minio
+        environment:
+            - MINIO_ROOT_USER=admin
+            - MINIO_ROOT_PASSWORD=password
+            - MINIO_DOMAIN=minio
+        networks:
+            iceberg_net:
+                aliases:
+                    - bronze.minio
+                    - silver.minio
+                    - gold.minio
+                    - warehouse.minio
+        ports:
+            - "9001:9001"
+            - "9000:9000"
+        command: ["server", "/data", "--console-address", ":9001"]
+        volumes:
+            - minio_data:/data
+
+    mc:
+        image: minio/mc
+        container_name: mc
+        depends_on:
+            - minio
+        networks:
+            iceberg_net:
+        environment:
+            - AWS_ACCESS_KEY_ID=admin
+            - AWS_SECRET_ACCESS_KEY=password
+            - AWS_REGION=us-east-1
+        entrypoint: |
+            /bin/sh -c "
+            # Wait for MinIO to fully start
+            until (/usr/bin/mc alias set minio http://minio:9000 admin password) do echo '...waiting...' && sleep 1; done;
+
+            # 1. Setup Bronze Bucket
+            /usr/bin/mc mb --ignore-existing minio/bronze;
+            /usr/bin/mc policy set public minio/bronze;
+
+            # 2. Setup Silver Bucket
+            /usr/bin/mc mb --ignore-existing minio/silver;
+            /usr/bin/mc policy set public minio/silver;
+
+            # 3. Setup Gold Bucket
+            /usr/bin/mc mb --ignore-existing minio/gold;
+            /usr/bin/mc policy set public minio/gold;
+
+            # 4. Setup Default Warehouse Bucket (Required as a fallback for the REST Catalog root)
+            /usr/bin/mc mb --ignore-existing minio/warehouse;
+            /usr/bin/mc policy set public minio/warehouse;
+
+            echo 'Medallion buckets successfully provisioned!'
+            tail -f /dev/null
+            "
+
+    trino:
+        image: trinodb/trino:440
+        container_name: trino
+        networks:
+            iceberg_net:
+        ports:
+            - "8085:8080"
+        volumes:
+            - ./trino/etc:/etc/trino
+        depends_on:
+            - rest
+            - minio
+
+    superset:
+        build: superset/
+        container_name: superset
+        networks:
+            iceberg_net:
+        environment:
+            - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY:-change-me-for-local-dev-only}
+            - SUPERSET_LOAD_EXAMPLES=no
+        ports:
+            - "8088:8088"
+        volumes:
+            - superset_home:/app/superset_home
+            - ./superset/superset_config.py:/app/pythonpath/superset_config.py
+        depends_on:
+            superset-init:
+                condition: service_completed_successfully
+        command: >
+            /bin/sh -c "
+            superset run -h 0.0.0.0 -p 8088
+            "
+
+    superset-init:
+        build: superset/
+        container_name: superset-init
+        networks:
+            iceberg_net:
+        environment:
+            - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY:-change-me-for-local-dev-only}
+        volumes:
+            - superset_home:/app/superset_home
+            - ./superset/superset_config.py:/app/pythonpath/superset_config.py
+        depends_on:
+            - trino
+        command: >
+            /bin/sh -c "
+            superset db upgrade &&
+            (superset fab create-admin
+            --username admin
+            --firstname Superset
+            --lastname Admin
+            --email admin@example.com
+            --password admin || true) &&
+            superset init &&
+            superset set-database-uri -d Iceberg -u trino://superset@trino:8080/iceberg/gold
+            "
+
 
 volumes:
     postgres_data:
     pgadmin_data:
-    spark_data:
+    minio_data:
+    superset_home:
+
+networks:
+    iceberg_net:
